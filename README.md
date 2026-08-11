@@ -1,4 +1,6 @@
 # MultiCamProbe
+<img width="2436" height="1125" alt="image" src="https://github.com/user-attachments/assets/842c74a4-6f42-4459-838b-746bcac990c2" />
+
 
 iPhone의 후면 Wide 및 Ultra Wide 카메라를 동시에 사용할 수 있는지 실기기에서 검사하는 최소 앱입니다.
 
