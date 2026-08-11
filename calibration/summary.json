@@ -1,0 +1,17 @@
+{
+  "samples": 25,
+  "image_size": [
+    640,
+    360
+  ],
+  "pattern_inner_corners": [
+    9,
+    6
+  ],
+  "square_size_m": 0.02527236142949243,
+  "wide_rms_pixels": 0.20625945721658898,
+  "ultra_rms_pixels": 0.2277394147532125,
+  "stereo_rms_pixels": 0.548450730244689,
+  "estimated_baseline_m": 0.016574439286122865,
+  "result_file": "stereo_calibration.npz"
+}

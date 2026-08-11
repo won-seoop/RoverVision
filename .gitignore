@@ -1,0 +1,19 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+
+# Xcode user-specific state and build output
+xcuserdata/
+DerivedData/
+build/
+
+# Calibration photos may contain private room/desk imagery.
+calibration/captures/
+calibration/*preview*.jpg
+calibration/depth_self_test.jpg
+calibration_v2/
+calibration_combined/
+
+# Optional runtime snapshots
+depth_snapshots/
