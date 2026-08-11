@@ -18,6 +18,9 @@ GRID_COLS = 5
 GRID_TOP_RATIO = 0.36
 GROUND_INLIER_M = 0.045
 OBSTACLE_HEIGHT_M = 0.10
+MIN_CAMERA_HEIGHT_M = 0.15
+MAX_CAMERA_HEIGHT_M = 1.20
+OBSTACLE_PIXEL_RATIO = 0.25
 
 
 def parse_args():
@@ -112,6 +115,11 @@ class StereoDepthEstimator:
             if -normal[1] < 0.48:
                 continue
             offset = -float(normal @ sample[0])
+            # Reject impossible camera heights before ranking candidates. A
+            # dominant wall/noise plane near the camera must not beat a
+            # smaller but geometrically plausible floor plane.
+            if not MIN_CAMERA_HEIGHT_M <= offset <= MAX_CAMERA_HEIGHT_M:
+                continue
             distances = np.abs(points @ normal + offset)
             inliers = distances < GROUND_INLIER_M
             score = int(inliers.sum())
@@ -132,7 +140,7 @@ class StereoDepthEstimator:
             return None, 0.0
         offset = -float(normal @ center)
         camera_height = offset
-        if not 0.15 <= camera_height <= 1.20:
+        if not MIN_CAMERA_HEIGHT_M <= camera_height <= MAX_CAMERA_HEIGHT_M:
             return None, 0.0
         confidence = best_score / points.shape[0]
         return (normal.astype(np.float32), offset), float(confidence)
@@ -170,7 +178,7 @@ class StereoDepthEstimator:
                     obstacle_pixels = int((heights >= OBSTACLE_HEIGHT_M).sum())
                     ground_pixels = int((np.abs(heights) <= GROUND_INLIER_M * 1.5).sum())
                     obstacle_height = float(np.percentile(heights, 90))
-                    if obstacle_pixels >= max(10, int(valid_pixels * 0.08)):
+                    if obstacle_pixels >= max(20, int(valid_pixels * OBSTACLE_PIXEL_RATIO)):
                         state = "BLOCKED"
                     elif ground_pixels >= max(12, int(valid_pixels * 0.10)):
                         state = "PASSABLE"

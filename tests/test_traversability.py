@@ -33,10 +33,20 @@ class TraversabilityTest(unittest.TestCase):
         )
         depth[obstacle] = -(camera_height - 0.15) / denominator[obstacle]
 
+        # A few bad stereo matches on otherwise flat ground must not turn a
+        # whole cell into an obstacle.
+        rng = np.random.default_rng(7)
+        noise_region = np.flatnonzero(
+            (xs < 128) & (ys >= 283) & valid
+        )
+        noisy = rng.choice(noise_region, int(noise_region.size * 0.08), replace=False)
+        depth.flat[noisy] = -(camera_height - 0.20) / denominator.flat[noisy]
+
         result = estimator.analyze_traversability(depth, valid)
 
         self.assertTrue(result["ground_plane_found"])
         self.assertEqual(result["cells"][12]["state"], "BLOCKED")
+        self.assertEqual(result["cells"][10]["state"], "PASSABLE")
         self.assertGreaterEqual(result["counts"]["PASSABLE"], 12)
 
 
