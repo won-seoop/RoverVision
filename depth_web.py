@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import threading
 import time
@@ -12,6 +13,19 @@ from live_depth import StereoDepthEstimator, make_dashboard, obstacle_state
 
 HOST = "127.0.0.1"
 PORT = 8081
+allowed_clients = {"127.0.0.1", "::1"}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="RoverVision web dashboard")
+    parser.add_argument("--host", default=HOST, help="address to listen on")
+    parser.add_argument(
+        "--allow-client",
+        action="append",
+        default=[],
+        help="client IP allowed to view the camera result (repeatable)",
+    )
+    return parser.parse_args()
 
 
 class LatestDepth:
@@ -82,6 +96,9 @@ def process_depth():
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.client_address[0] not in allowed_clients:
+            self.send_error(403, "This device is not allowed")
+            return
         path = self.path.split("?", 1)[0]
         image, stats = latest.snapshot()
         if path == "/dashboard.jpg":
@@ -145,6 +162,10 @@ setInterval(refresh,200);refresh();
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    allowed_clients.add(args.host)
+    allowed_clients.update(args.allow_client)
     threading.Thread(target=process_depth, daemon=True).start()
-    print(f"RoverVision depth dashboard: http://{HOST}:{PORT}", flush=True)
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    print(f"RoverVision depth dashboard: http://{args.host}:{PORT}", flush=True)
+    print(f"Allowed clients: {', '.join(sorted(allowed_clients))}", flush=True)
+    ThreadingHTTPServer((args.host, PORT), Handler).serve_forever()

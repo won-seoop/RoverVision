@@ -1,8 +1,10 @@
 import SwiftUI
+import WebKit
 
 struct ContentView: View {
     @StateObject private var probe = CameraProbe()
     @State private var macHost = "192.168.0.36"
+    @State private var showsRoverResult = false
 
     var body: some View {
         NavigationStack {
@@ -38,6 +40,15 @@ struct ContentView: View {
                             }
                             .buttonStyle(.bordered)
                         }
+                        Button {
+                            showsRoverResult = true
+                        } label: {
+                            Label("실시간 결과 보기", systemImage: "map.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                        .disabled(resultURL == nil)
                         Text(probe.streamStatus)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -70,7 +81,37 @@ struct ContentView: View {
             .onDisappear {
                 probe.stop()
             }
+            .sheet(isPresented: $showsRoverResult) {
+                NavigationStack {
+                    if let resultURL {
+                        RoverResultWebView(url: resultURL)
+                            .ignoresSafeArea(edges: .bottom)
+                            .navigationTitle("RoverVision 결과")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button("닫기") {
+                                        showsRoverResult = false
+                                    }
+                                }
+                            }
+                    } else {
+                        VStack(spacing: 12) {
+                            Image(systemName: "wifi.exclamationmark")
+                                .font(.largeTitle)
+                            Text("Mac 주소를 확인하세요")
+                                .font(.headline)
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    private var resultURL: URL? {
+        let host = macHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else { return nil }
+        return URL(string: "http://\(host):8081")
     }
 
     private var statusCard: some View {
@@ -107,4 +148,17 @@ struct ContentView: View {
         .padding(12)
         .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
     }
+}
+
+private struct RoverResultWebView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        let webView = WKWebView(frame: .zero)
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {}
 }

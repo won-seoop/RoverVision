@@ -66,3 +66,15 @@ Safari에서 `http://127.0.0.1:8081`을 열면 실시간 거리 화면이 표시
 아이폰은 바닥에서 약 0.4~0.5m 높이에 고정하고, 1~1.5m 앞의 바닥을 향해
 살짝 아래로 기울입니다. 바닥면을 찾지 못한 경우 안전을 위해 모든 칸을
 미확인 영역으로 처리합니다.
+
+## iPhone 앱에서 결과 보기
+
+Mac과 iPhone이 같은 Wi-Fi에 연결된 상태에서 Mac의 LAN IP에 서버를 열고
+현재 iPhone IP만 허용해 실행합니다.
+
+```bash
+.venv/bin/python depth_web.py --host <Mac-IP> --allow-client <iPhone-IP>
+```
+
+앱의 Mac IP 주소를 확인한 다음 `실시간 결과 보기`를 누릅니다. Mac이 계산한
+Depth와 Traversability Map이 앱 내부 웹 화면에 표시됩니다.
