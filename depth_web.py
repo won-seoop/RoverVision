@@ -52,6 +52,7 @@ def process_depth():
         last_sequence = sequence
 
         rectified_wide, rectified_ultra, disparity, depth, valid = estimator.estimate(wide, ultra)
+        traversability = estimator.analyze_traversability(depth, valid)
         frame_count += 1
         elapsed = time.monotonic() - started
         if elapsed >= 1.0:
@@ -59,7 +60,7 @@ def process_depth():
             frame_count = 0
             started = time.monotonic()
         dashboard, distance, valid_ratio = make_dashboard(
-            rectified_wide.copy(), rectified_ultra, depth, valid, fps
+            rectified_wide.copy(), rectified_ultra, depth, valid, fps, traversability
         )
         ok, encoded = cv2.imencode(".jpg", dashboard, [cv2.IMWRITE_JPEG_QUALITY, 82])
         if not ok:
@@ -71,6 +72,8 @@ def process_depth():
                 "sequence": int(sequence),
                 "center_distance_m": distance,
                 "obstacle_state": obstacle_state(distance),
+                "ground_plane_found": traversability["ground_plane_found"],
+                "traversability_counts": traversability["counts"],
                 "valid_depth_percent": round(valid_ratio * 100, 1),
                 "processing_fps": round(fps, 1),
             },
@@ -90,7 +93,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(image)))
             self.end_headers()
-            self.wfile.write(image)
+            try:
+                self.wfile.write(image)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             return
         if path == "/stats.json":
             payload = json.dumps(stats).encode()
@@ -121,10 +127,10 @@ PAGE = """<!doctype html>
 <title>RoverVision Live Depth</title>
 <style>
 body{margin:0;background:#0b0b0b;color:#fff;font-family:system-ui;text-align:center}
-header{padding:14px}h1{margin:0;font-size:24px}#state{font-size:34px;font-weight:800;margin-top:8px}#stats{color:#ddd;margin-top:4px}
+header{padding:14px}h1{margin:0;font-size:24px}#state{font-size:34px;font-weight:800;margin-top:8px}#stats,#terrain{color:#ddd;margin-top:4px}#terrain{font-weight:700}
 img{width:min(100vw,1280px);height:auto;background:#000;display:block;margin:auto}
 </style>
-<header><h1>RoverVision Live Stereo Depth</h1><div id="state">WAITING</div><div id="stats">Waiting...</div></header>
+<header><h1>RoverVision Live Stereo Depth</h1><div id="state">WAITING</div><div id="stats">Waiting...</div><div id="terrain"></div></header>
 <img id="view" alt="Waiting for depth frames">
 <script>
 async function refresh(){const t=Date.now();view.src='/dashboard.jpg?t='+t;
@@ -132,6 +138,7 @@ try{const s=await fetch('/stats.json?t='+t).then(r=>r.json());
 if(s.status==='running'){
 state.textContent=s.obstacle_state;state.style.color=s.obstacle_state==='OBSTACLE'?'#ff4242':s.obstacle_state==='CLEAR'?'#39e75f':'#ffae42';
 stats.textContent=`Center: ${s.center_distance_m?.toFixed(2) ?? 'NO DEPTH'} m | Limit: 0.60 m | Valid: ${s.valid_depth_percent}% | ${s.processing_fps} fps`
+const c=s.traversability_counts;terrain.textContent=`Ground: ${s.ground_plane_found?'FOUND':'NOT FOUND'} | Passable: ${c.PASSABLE} | Blocked: ${c.BLOCKED} | Unknown: ${c.UNKNOWN}`
 }else{state.textContent='WAITING';state.style.color='#ffae42';stats.textContent=s.status}}catch(e){}}
 setInterval(refresh,200);refresh();
 </script>"""

@@ -13,6 +13,11 @@ WINDOW_NAME = "RoverVision Live Stereo Depth"
 MIN_DEPTH_M = 0.20
 MAX_DEPTH_M = 3.00
 OBSTACLE_THRESHOLD_M = 0.60
+GRID_ROWS = 3
+GRID_COLS = 5
+GRID_TOP_RATIO = 0.36
+GROUND_INLIER_M = 0.045
+OBSTACLE_HEIGHT_M = 0.10
 
 
 def parse_args():
@@ -35,6 +40,9 @@ class StereoDepthEstimator:
         wide_projection = calibration["wide_projection"]
         ultra_projection = calibration["ultra_projection"]
         self.focal_pixels = float(wide_projection[0, 0])
+        self.focal_y_pixels = float(wide_projection[1, 1])
+        self.center_x = float(wide_projection[0, 2])
+        self.center_y = float(wide_projection[1, 2])
         self.baseline_m = abs(float(ultra_projection[0, 3]) / self.focal_pixels)
         self.min_disparity = -96
         self.num_disparities = 128
@@ -53,6 +61,7 @@ class StereoDepthEstimator:
             mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
         )
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self.rng = np.random.default_rng(20260811)
 
     def estimate(self, wide, ultra):
         rectified_wide = cv2.remap(wide, self.wide_map_x, self.wide_map_y, cv2.INTER_LINEAR)
@@ -67,6 +76,127 @@ class StereoDepthEstimator:
         valid &= (depth >= MIN_DEPTH_M) & (depth <= MAX_DEPTH_M)
         depth[~valid] = np.nan
         return rectified_wide, rectified_ultra, disparity, depth, valid
+
+    def points_from_pixels(self, xs, ys, depths):
+        x = (xs.astype(np.float32) - self.center_x) * depths / self.focal_pixels
+        y = (ys.astype(np.float32) - self.center_y) * depths / self.focal_y_pixels
+        return np.column_stack((x, y, depths))
+
+    def fit_ground_plane(self, depth, valid):
+        height, _ = depth.shape
+        candidate_mask = valid.copy()
+        candidate_mask[: int(height * GRID_TOP_RATIO)] = False
+        ys, xs = np.nonzero(candidate_mask)
+        if xs.size < 120:
+            return None, 0.0
+
+        depths = depth[ys, xs]
+        points = self.points_from_pixels(xs, ys, depths)
+        if points.shape[0] > 1600:
+            indices = self.rng.choice(points.shape[0], 1600, replace=False)
+            points = points[indices]
+
+        best_mask = None
+        best_score = 0
+        for _ in range(70):
+            sample = points[self.rng.choice(points.shape[0], 3, replace=False)]
+            normal = np.cross(sample[1] - sample[0], sample[2] - sample[0])
+            length = np.linalg.norm(normal)
+            if length < 1e-6:
+                continue
+            normal /= length
+            if normal[1] > 0:
+                normal = -normal
+            # A floor normal points mainly upward in camera coordinates. This
+            # rejects walls and objects that happen to form a large plane.
+            if -normal[1] < 0.48:
+                continue
+            offset = -float(normal @ sample[0])
+            distances = np.abs(points @ normal + offset)
+            inliers = distances < GROUND_INLIER_M
+            score = int(inliers.sum())
+            if score > best_score:
+                best_score = score
+                best_mask = inliers
+
+        if best_mask is None or best_score < max(70, int(points.shape[0] * 0.10)):
+            return None, 0.0
+
+        floor_points = points[best_mask]
+        center = floor_points.mean(axis=0)
+        _, _, vectors = np.linalg.svd(floor_points - center, full_matrices=False)
+        normal = vectors[-1]
+        if normal[1] > 0:
+            normal = -normal
+        if -normal[1] < 0.48:
+            return None, 0.0
+        offset = -float(normal @ center)
+        camera_height = offset
+        if not 0.15 <= camera_height <= 1.20:
+            return None, 0.0
+        confidence = best_score / points.shape[0]
+        return (normal.astype(np.float32), offset), float(confidence)
+
+    def analyze_traversability(self, depth, valid):
+        height, width = depth.shape
+        plane, confidence = self.fit_ground_plane(depth, valid)
+        top = int(height * GRID_TOP_RATIO)
+        bottom = height
+        cells = []
+
+        for row in range(GRID_ROWS):
+            y1 = top + (bottom - top) * row // GRID_ROWS
+            y2 = top + (bottom - top) * (row + 1) // GRID_ROWS
+            for col in range(GRID_COLS):
+                x1 = width * col // GRID_COLS
+                x2 = width * (col + 1) // GRID_COLS
+                cell_mask = valid[y1:y2, x1:x2]
+                ys_local, xs_local = np.nonzero(cell_mask)
+                valid_pixels = int(xs_local.size)
+                state = "UNKNOWN"
+                distance = None
+                obstacle_height = None
+
+                if valid_pixels:
+                    cell_depths = depth[y1:y2, x1:x2][cell_mask]
+                    distance = float(np.median(cell_depths))
+
+                if plane is not None and valid_pixels >= 30:
+                    xs = xs_local + x1
+                    ys = ys_local + y1
+                    points = self.points_from_pixels(xs, ys, cell_depths)
+                    normal, offset = plane
+                    heights = points @ normal + offset
+                    obstacle_pixels = int((heights >= OBSTACLE_HEIGHT_M).sum())
+                    ground_pixels = int((np.abs(heights) <= GROUND_INLIER_M * 1.5).sum())
+                    obstacle_height = float(np.percentile(heights, 90))
+                    if obstacle_pixels >= max(10, int(valid_pixels * 0.08)):
+                        state = "BLOCKED"
+                    elif ground_pixels >= max(12, int(valid_pixels * 0.10)):
+                        state = "PASSABLE"
+
+                cells.append(
+                    {
+                        "row": row,
+                        "col": col,
+                        "box": (x1, y1, x2, y2),
+                        "state": state,
+                        "distance_m": distance,
+                        "obstacle_height_m": obstacle_height,
+                        "valid_pixels": valid_pixels,
+                    }
+                )
+
+        counts = {
+            state: sum(cell["state"] == state for cell in cells)
+            for state in ("PASSABLE", "BLOCKED", "UNKNOWN")
+        }
+        return {
+            "ground_plane_found": plane is not None,
+            "ground_confidence": confidence,
+            "cells": cells,
+            "counts": counts,
+        }
 
 
 def robust_distance(depth, valid, roi):
@@ -101,7 +231,40 @@ def depth_colormap(depth, valid):
     return colored
 
 
-def make_dashboard(rectified_wide, rectified_ultra, depth, valid, fps):
+def draw_traversability(image, traversability):
+    if traversability is None:
+        return
+    colors = {
+        "PASSABLE": (0, 210, 0),
+        "BLOCKED": (0, 0, 255),
+        "UNKNOWN": (0, 165, 255),
+    }
+    labels = {"PASSABLE": "PASS", "BLOCKED": "BLOCK", "UNKNOWN": "?"}
+    overlay = image.copy()
+    for cell in traversability["cells"]:
+        x1, y1, x2, y2 = cell["box"]
+        cv2.rectangle(overlay, (x1 + 1, y1 + 1), (x2 - 1, y2 - 1), colors[cell["state"]], -1)
+    cv2.addWeighted(overlay, 0.28, image, 0.72, 0, image)
+
+    for cell in traversability["cells"]:
+        x1, y1, x2, y2 = cell["box"]
+        color = colors[cell["state"]]
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+        distance = cell["distance_m"]
+        distance_text = "--" if distance is None else f"{distance:.1f}m"
+        cv2.putText(
+            image,
+            f"{labels[cell['state']]} {distance_text}",
+            (x1 + 5, y1 + 23),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+
+def make_dashboard(rectified_wide, rectified_ultra, depth, valid, fps, traversability=None):
     height, width = depth.shape
     roi_width = max(80, width // 5)
     roi_height = max(70, height // 4)
@@ -139,7 +302,31 @@ def make_dashboard(rectified_wide, rectified_ultra, depth, valid, fps):
     )
     cv2.putText(depth_view, f"DEPTH {MIN_DEPTH_M:.1f}-{MAX_DEPTH_M:.1f}m", (18, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(depth_view, "RED=CLOSE  BLUE=FAR", (18, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(rectified_wide, f"{fps:.1f} fps | valid center pixels: {valid_pixels}", (18, height - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    draw_traversability(rectified_wide, traversability)
+    if traversability is not None:
+        counts = traversability["counts"]
+        ground = "GROUND OK" if traversability["ground_plane_found"] else "NO GROUND"
+        cv2.putText(
+            depth_view,
+            f"TRAVERSABILITY: {ground}",
+            (18, 92),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            depth_view,
+            f"PASS {counts['PASSABLE']}  BLOCK {counts['BLOCKED']}  UNKNOWN {counts['UNKNOWN']}",
+            (18, 118),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+    cv2.putText(depth_view, f"{fps:.1f} fps | valid center pixels: {valid_pixels}", (18, height - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
     dashboard = np.hstack([rectified_wide, depth_view])
     return dashboard, distance, float(valid.mean())
@@ -162,7 +349,10 @@ def self_test(args):
     if wide is None or ultra is None:
         raise FileNotFoundError("self-test images not found")
     rectified_wide, rectified_ultra, disparity, depth, valid = estimator.estimate(wide, ultra)
-    dashboard, distance, valid_ratio = make_dashboard(rectified_wide, rectified_ultra, depth, valid, 0.0)
+    traversability = estimator.analyze_traversability(depth, valid)
+    dashboard, distance, valid_ratio = make_dashboard(
+        rectified_wide, rectified_ultra, depth, valid, 0.0, traversability
+    )
     output = Path("calibration/depth_self_test.jpg")
     cv2.imwrite(str(output), dashboard)
     finite = depth[np.isfinite(depth)]
@@ -212,13 +402,16 @@ def main():
             last_sequence = sequence
 
             rectified_wide, rectified_ultra, disparity, depth, valid = estimator.estimate(wide, ultra)
+            traversability = estimator.analyze_traversability(depth, valid)
             frame_count += 1
             elapsed = time.monotonic() - fps_started
             if elapsed >= 1.0:
                 fps = frame_count / elapsed
                 frame_count = 0
                 fps_started = time.monotonic()
-            dashboard, distance, valid_ratio = make_dashboard(rectified_wide.copy(), rectified_ultra, depth, valid, fps)
+            dashboard, distance, valid_ratio = make_dashboard(
+                rectified_wide.copy(), rectified_ultra, depth, valid, fps, traversability
+            )
             last_result = (sequence, rectified_wide, rectified_ultra, disparity, depth, dashboard)
             cv2.imshow(WINDOW_NAME, dashboard)
             key = cv2.waitKey(1) & 0xFF
